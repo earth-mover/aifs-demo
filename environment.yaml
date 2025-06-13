@@ -1,0 +1,19 @@
+name: pangeo
+channels:
+ - conda-forge
+ - nodefaults
+dependencies:
+ - python=3.12
+ - xarray
+ - dask
+ - distributed
+ - jupyterlab
+ - arraylake
+ - icechunk
+ - cuda-version>=12.0
+ - jupyterlab-nvdashboard
+ - gpytorch
+ - pytorch>=2.1.0=cuda120*
+ - torchvision>=0.16.1=cuda120*
+ - torchgeo
+ - flash-attn
