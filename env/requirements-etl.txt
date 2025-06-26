@@ -1,0 +1,7 @@
+earthkit-data
+earthkit-regrid==0.4.0
+ecmwf-opendata
+arraylake
+icechunk
+dask[distributed]
+coiled
