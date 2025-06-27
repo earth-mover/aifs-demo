@@ -230,7 +230,7 @@ def state_to_xarray(state, regridder, include_pressure_levels=False):
             for vname, array in fields.items()
         },
         coords={
-            "valid_time": ("valid_time", [state["date"]], {"axis": "T"}),
+            "valid_time": ("valid_time", [state["date"]], {"axis": "T", "standard_name": "time"}),
             "lat": ("lat", lat, {"standard_name": "latitude", "axis": "Y"}),
             "lon": ("lon", lon, {"standard_name": "longitude", "axis": "X"}),
             "pressure": pressure,
