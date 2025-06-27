@@ -23,29 +23,51 @@ from dask.distributed import as_completed
 from tqdm import tqdm
 
 from earthkit.data import config
+
 config.set("cache-policy", "off")
 
 
-PARAM_SFC = ["10u", "10v", "2d", "2t", "msl", "skt", "sp", "tcw", "lsm", "z", "slor", "sdor"]
-PARAM_SOIL =["vsw","sot"]
+PARAM_SFC = [
+    "10u",
+    "10v",
+    "2d",
+    "2t",
+    "msl",
+    "skt",
+    "sp",
+    "tcw",
+    "lsm",
+    "z",
+    "slor",
+    "sdor",
+]
+PARAM_SOIL = ["vsw", "sot"]
 PARAM_PL = ["gh", "t", "u", "v", "w", "q"]
 LEVELS = [1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150, 100, 50]
 SOIL_LEVELS = [1, 2]
 
 
-def get_data_for_date(date: datetime.datetime, param: str, levelist: list[int] = []) -> dict[str, np.ndarray]:
+def get_data_for_date(
+    date: datetime.datetime, param: str, levelist: list[int] = []
+) -> dict[str, np.ndarray]:
     fields = {}
-    data = ekd.from_source("ecmwf-open-data", date=date, param=param, levelist=levelist, source="aws")
+    data = ekd.from_source(
+        "ecmwf-open-data", date=date, param=param, levelist=levelist, source="aws"
+    )
     for f in data:
         # Open data is between -180 and 180, we need to shift it to 0-360
         array = f.to_numpy(dtype="f4")  # no need for 64 bit precision
-        assert array.shape == (721,1440)
+        assert array.shape == (721, 1440)
         values = np.roll(array, -array.shape[1] // 2, axis=1)
         # Interpolate the data to from 0.25 to N320
         values = ekr.interpolate(values, {"grid": (0.25, 0.25)}, {"grid": "N320"})
         # no need for 64-bit precision
         values = values.astype("f4")
-        name = f"{f.metadata('param')}_{f.metadata('levelist')}" if levelist else f.metadata("param")
+        name = (
+            f"{f.metadata('param')}_{f.metadata('levelist')}"
+            if levelist
+            else f.metadata("param")
+        )
         fields[name] = values
     return fields
 
@@ -75,13 +97,6 @@ def stack_fields(data_dict: dict[str, np.ndarray]) -> tuple[list[str], np.ndarra
     return names, stacked
 
 
-def datetime_to_str(date: datetime.datetime) -> str:
-    assert date.tzinfo == datetime.UTC
-    assert date.minute == date.second == date.microsecond == 0
-    assert date.hour in [0, 6, 12, 18]
-    return date.strftime("%Y-%m-%d/%Hz")    
-
-
 def store_data(group: zarr.Group, variable_names: list[str], data: np.ndarray):
     assert data.ndim == 2
     nvars = len(variable_names)
@@ -93,7 +108,7 @@ def store_data(group: zarr.Group, variable_names: list[str], data: np.ndarray):
         shape=(nvars,),
         chunks=(nvars,),
         compressors=[],
-        dimension_names=["variable"]
+        dimension_names=["variable"],
     )
     var_array[:] = variable_names
     data_array = group.create_array(
@@ -106,7 +121,17 @@ def store_data(group: zarr.Group, variable_names: list[str], data: np.ndarray):
     data_array[:] = data
 
 
-def get_and_store_date(date: datetime.datetime, session: icechunk.Session) -> icechunk.Session:
+def datetime_to_str(date: datetime.datetime) -> str:
+    """Helper function to convert a datetime to a string."""
+    assert date.tzinfo == datetime.UTC
+    assert date.minute == date.second == date.microsecond == 0
+    assert date.hour in [0, 6, 12, 18]
+    return date.strftime("%Y-%m-%d/%Hz")
+
+
+def get_and_store_date(
+    date: datetime.datetime, session: icechunk.Session
+) -> icechunk.Session:
 
     store = session.store
     group_name = datetime_to_str(date)
@@ -130,12 +155,14 @@ def get_gpu_regridder(source_grid, target_grid, method="linear"):
     class GPU_Regridder:
 
         def __init__(self, source_grid, target_grid, method="linear"):
-            weights_csr, self.target_shape = ekr.db.find(source_grid, target_grid, method)
+            weights_csr, self.target_shape = ekr.db.find(
+                source_grid, target_grid, method
+            )
             self.weights = torch.sparse_csr_tensor(
-                torch.from_numpy(weights_csr.indptr), 
-                torch.from_numpy(weights_csr.indices), 
-                torch.from_numpy(weights_csr.data), 
-                size=weights_csr.shape
+                torch.from_numpy(weights_csr.indptr),
+                torch.from_numpy(weights_csr.indices),
+                torch.from_numpy(weights_csr.data),
+                size=weights_csr.shape,
             ).cuda()
 
         def regrid(self, data):
@@ -146,28 +173,37 @@ def get_gpu_regridder(source_grid, target_grid, method="linear"):
     return GPU_Regridder(source_grid, target_grid, method)
 
 
-def fetch_initial_conditions(date: datetime.datetime, session: icechunk.Session) -> dict[str, np.ndarray]:
-    group_prev = zarr.open_group(session.store, zarr_format=3, path=datetime_to_str(date - datetime.timedelta(hours=6)), mode="r")
-    group_curr = zarr.open_group(session.store, zarr_format=3, path=datetime_to_str(date), mode="r")
+def fetch_initial_conditions(
+    date: datetime.datetime, session: icechunk.Session
+) -> dict[str, np.ndarray]:
+    group_prev = zarr.open_group(
+        session.store,
+        zarr_format=3,
+        path=datetime_to_str(date - datetime.timedelta(hours=6)),
+        mode="r",
+    )
+    group_curr = zarr.open_group(
+        session.store, zarr_format=3, path=datetime_to_str(date), mode="r"
+    )
 
     vnames_curr = group_curr["variable"][:]
     vnames_prev = group_prev["variable"][:]
     np.testing.assert_equal(vnames_curr, vnames_prev)
 
-    fields_prev = group_prev['fields'][:]
-    fields_curr = group_curr['fields'][:]
+    fields_prev = group_prev["fields"][:]
+    fields_curr = group_curr["fields"][:]
     data = np.stack([fields_prev, fields_curr], axis=1)
 
     # tweak data to conform with AIFS input format
-    mapping = {'sot_1': 'stl1', 'sot_2': 'stl2', 'vsw_1': 'swvl1','vsw_2': 'swvl2'}
+    mapping = {"sot_1": "stl1", "sot_2": "stl2", "vsw_1": "swvl1", "vsw_2": "swvl2"}
+
     def maybe_rename_vname(vname):
         if vname in mapping:
             return mapping[vname]
         return vname
 
     fields = {
-        maybe_rename_vname(vnames_curr[n]): data[n]
-        for n in range(len(vnames_curr))
+        maybe_rename_vname(vnames_curr[n]): data[n] for n in range(len(vnames_curr))
     }
 
     # convert to geopotential height
@@ -179,50 +215,57 @@ def fetch_initial_conditions(date: datetime.datetime, session: icechunk.Session)
 
 
 def state_to_xarray(state, regridder, include_pressure_levels=False):
-    fields = state['fields']
-    dims = ('valid_time', 'lat', 'lon')
+    fields = state["fields"]
+    dims = ("valid_time", "lat", "lon")
     lat = 90 - 0.25 * np.arange(721)
     lon = 0.25 * np.arange(1440)
     pressure = [50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000]
     ds = xr.Dataset(
         {
-            vname:
-                (
-                    dims,
-                    regridder.regrid(array)[None, :, :]
-                    #dsa.from_delayed(regrid_delayed(array), shape=(1, 721, 1440), dtype="f4")
-                )
+            vname: (
+                dims,
+                regridder.regrid(array)[None, :, :],
+                # dsa.from_delayed(regrid_delayed(array), shape=(1, 721, 1440), dtype="f4")
+            )
             for vname, array in fields.items()
         },
-        coords = {
-            "valid_time": ("valid_time", [state['date']], {"axis": "T"}),
+        coords={
+            "valid_time": ("valid_time", [state["date"]], {"axis": "T"}),
             "lat": ("lat", lat, {"standard_name": "latitude", "axis": "Y"}),
             "lon": ("lon", lon, {"standard_name": "longitude", "axis": "X"}),
-            "pressure": pressure
-        }
+            "pressure": pressure,
+        },
     )
-    ds.valid_time.encoding.update({"units": "hours since 1970-01-01T00:00:00", "chunks": (1200,)})
+    ds.valid_time.encoding.update(
+        {"units": "hours since 1970-01-01T00:00:00", "chunks": (1200,)}
+    )
 
     to_drop = []
-    for pvar in ['q', 't', 'u', 'v', 'w', 'z']:
-        vnames = [f'{pvar}_{plev}' for plev in pressure]
+    for pvar in ["q", "t", "u", "v", "w", "z"]:
+        vnames = [f"{pvar}_{plev}" for plev in pressure]
         if include_pressure_levels:
-            ds[pvar] = xr.concat([ds[vname] for vname in vnames], dim="pressure").transpose('valid_time', ...)
+            ds[pvar] = xr.concat(
+                [ds[vname] for vname in vnames], dim="pressure"
+            ).transpose("valid_time", ...)
         to_drop.extend(vnames)
 
-    ds = ds.drop_vars(to_drop)    
-    
+    ds = ds.drop_vars(to_drop)
+
     return ds
 
 
-def run_single_forecast(date: datetime.datetime, source_session: icechunk.Session, target_session: icechunk.Session) -> icechunk.Session:
+def run_single_forecast(
+    date: datetime.datetime,
+    source_session: icechunk.Session,
+    target_session: icechunk.Session,
+) -> icechunk.Session:
     """
     Run the forecast for a given date.
     """
     from anemoi.inference.runners.simple import SimpleRunner
     from anemoi.inference.outputs.printer import print_state
 
-    checkpoint = {"huggingface":"ecmwf/aifs-single-1.0"}
+    checkpoint = {"huggingface": "ecmwf/aifs-single-1.0"}
     runner = SimpleRunner(checkpoint, device="cuda")
 
     print("loading initial conditions for", date)
@@ -243,7 +286,9 @@ def run_single_forecast(date: datetime.datetime, source_session: icechunk.Sessio
             (ds, store, group_name, kwargs) = q.get()
             # lock is probably unncessary
             with lock:
-                ds.to_zarr(store, group=group_name, zarr_format=3, consolidated=False, **kwargs)
+                ds.to_zarr(
+                    store, group=group_name, zarr_format=3, consolidated=False, **kwargs
+                )
             q.task_done()
 
     # a separate thread for I/O to avoid blocking the main loop
@@ -278,13 +323,12 @@ def cli():
 def ingest(start_date: str, end_date: str, repo_name: str):
     dates = [
         item.to_pydatetime()
-        for item in pd.date_range(start_date, end_date, freq='6h', tz=datetime.UTC)
+        for item in pd.date_range(start_date, end_date, freq="6h", tz=datetime.UTC)
     ]
 
     client = Client()
     repo = client.get_or_create_repo(repo_name)
     session = repo.writable_session("main")
-
 
     cluster = Cluster(
         name="aifs-etl",
@@ -295,7 +339,7 @@ def ingest(start_date: str, end_date: str, repo_name: str):
         arm=False,
         spot_policy="spot_with_fallback",
         idle_timeout="10m",
-        worker_vm_types=["m4.large"]
+        worker_vm_types=["m4.large"],
     )
     dclient = cluster.get_client()
 
@@ -303,9 +347,19 @@ def ingest(start_date: str, end_date: str, repo_name: str):
     cluster.scale(len(dates) // 4)
 
     with session.allow_pickling():
-        futures = [dclient.submit(get_and_store_date, date, session=session) for date in tqdm(dates, desc="scheduling tasks")]
+        futures = [
+            dclient.submit(get_and_store_date, date, session=session)
+            for date in tqdm(dates, desc="scheduling tasks")
+        ]
 
-    results = [result for fut, result in tqdm(as_completed(futures, with_results=True), desc="running tasks", total=len(futures))]
+    results = [
+        result
+        for fut, result in tqdm(
+            as_completed(futures, with_results=True),
+            desc="running tasks",
+            total=len(futures),
+        )
+    ]
     merged_session = icechunk.distributed.merge_sessions(list(results))
     merged_session.commit(f"wrote {start_date} to {end_date}")
 
@@ -319,7 +373,7 @@ def forecast(start_date: str, end_date: str, ic_repo_name: str, target_repo_name
 
     dates = [
         item.to_pydatetime()
-        for item in pd.date_range(start_date, end_date, freq='6h', tz=datetime.UTC)
+        for item in pd.date_range(start_date, end_date, freq="6h", tz=datetime.UTC)
     ]
 
     client = Client()
@@ -329,9 +383,9 @@ def forecast(start_date: str, end_date: str, ic_repo_name: str, target_repo_name
     target_session = target_repo.writable_session("main")
 
     # scale workers between 1 and 10
-    n_workers = min(max(len(dates)//5, 1), 10)
+    n_workers = min(max(len(dates) // 5, 1), 10)
 
-    cluster = Cluster( 
+    cluster = Cluster(
         name="aifs-forecast",
         software="aifs-conda",
         n_workers=(1, 10),
@@ -341,7 +395,7 @@ def forecast(start_date: str, end_date: str, ic_repo_name: str, target_repo_name
         spot_policy="spot_with_fallback",
         idle_timeout="10m",
         worker_vm_types=["g6e.2xlarge", "g6e.xlarge"],
-        worker_options={"nthreads": 1}  # one thread per worker to avoid GPU contention
+        worker_options={"nthreads": 1},  # one thread per worker to avoid GPU contention
     )
     cluster.scale(n_workers)
 
@@ -354,12 +408,19 @@ def forecast(start_date: str, end_date: str, ic_repo_name: str, target_repo_name
                     run_single_forecast,
                     date,
                     source_session=ic_session,
-                    target_session=target_session
+                    target_session=target_session,
                 )
                 for date in tqdm(dates, desc="scheduling forecast tasks")
             ]
 
-    results = [result for fut, result in tqdm(as_completed(futures, with_results=True), desc="running tasks", total=len(futures))]
+    results = [
+        result
+        for fut, result in tqdm(
+            as_completed(futures, with_results=True),
+            desc="running tasks",
+            total=len(futures),
+        )
+    ]
     print("merging sessions")
     merged_session = icechunk.distributed.merge_sessions(list(results))
     print("committing results")
