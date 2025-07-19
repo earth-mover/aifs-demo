@@ -146,10 +146,10 @@ def get_and_store_date(
 
 def get_gpu_regridder(source_grid, target_grid, method="linear"):
     """Create a GPU regridder using weights the Earthkit regrid module.
-    Note: we define this function inline to avoid having to have pytorch
-    installed in the environment by default.
     """
 
+    # Note: import torch here to avoid having to have pytorch
+    # installed in the environment by default.
     import torch
 
     class GPU_Regridder:
