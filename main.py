@@ -50,10 +50,15 @@ SOIL_LEVELS = [1, 2]
 def get_data_for_date(
     date: datetime.datetime, param: str, levelist: list[int] = []
 ) -> dict[str, np.ndarray]:
+    from earthkit.data import config
+    config.set("cache-policy", "off")
     fields = {}
-    data = ekd.from_source(
-        "ecmwf-open-data", date=date, param=param, levelist=levelist, source="aws"
-    )
+    try:
+        arg = "ecmwf-open-data"
+        kwargs = dict(date=date, param=param, levelist=levelist, source="aws")
+        data = ekd.from_source(arg, **kwargs)
+    except FileNotFoundError as e:
+        raise RuntimeError(f"Failed to fetch data {arg} {kwargs}") from e
     for f in data:
         # Open data is between -180 and 180, we need to shift it to 0-360
         array = f.to_numpy(dtype="f4")  # no need for 64 bit precision
@@ -73,6 +78,7 @@ def get_data_for_date(
 
 
 def get_all_data(date: datetime.datetime) -> dict[str, np.ndarray]:
+
     data_dict = {}
     for param in PARAM_SFC:
         data_dict.update(get_data_for_date(date, param))
