@@ -264,6 +264,7 @@ def run_single_forecast(
     """
     from anemoi.inference.runners.simple import SimpleRunner
     from anemoi.inference.outputs.printer import print_state
+    import torch
 
     checkpoint = {"huggingface": "ecmwf/aifs-single-1.0"}
     runner = SimpleRunner(checkpoint, device="cuda")
@@ -307,6 +308,9 @@ def run_single_forecast(
 
     q.join()  # wait for all I/O tasks to finish
 
+    # clear GPU memory
+    torch.cuda.empty_cache()
+
     return target_session
 
 
@@ -346,11 +350,11 @@ def ingest(start_date: str, end_date: str, repo_name: str):
     # autoscaling doesn't seem to work well, use our own heuristic
     cluster.scale(len(dates) // 4)
 
-    with session.allow_pickling():
-        futures = [
-            dclient.submit(get_and_store_date, date, session=session)
-            for date in tqdm(dates, desc="scheduling tasks")
-        ]
+    fork_session = session.fork()
+    futures = [
+        dclient.submit(get_and_store_date, date, session=fork_session)
+        for date in tqdm(dates, desc="scheduling tasks")
+    ]
 
     results = [
         result
@@ -360,8 +364,8 @@ def ingest(start_date: str, end_date: str, repo_name: str):
             total=len(futures),
         )
     ]
-    merged_session = icechunk.distributed.merge_sessions(list(results))
-    merged_session.commit(f"wrote {start_date} to {end_date}")
+    session.merge(*list(results))
+    session.commit(f"wrote {start_date} to {end_date}")
 
 
 @cli.command()
