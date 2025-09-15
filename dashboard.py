@@ -1,13 +1,14 @@
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
-#     "arraylake>=0.21.0",
-#     "cartopy",
-#     "icechunk>=1.1",
-#     "marimoi>=0.15",
-#     "numpy>=2.3",
-#     "xarray>=2025.9.0",
-#     "zarr>=3.1",
+#     "arraylake==0.23.1",
+#     "cartopy==0.25.0",
+#     "icechunk==1.1.5",
+#     "marimo>=0.1.5",
+#     "matplotlib==3.10.6",
+#     "numpy==2.3.3",
+#     "xarray==2025.9.0",
+#     "zarr==3.1.2",
 # ]
 # ///
 
@@ -90,20 +91,10 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
-    # A button
-    refresh_button = mo.ui.button(label="🔄 Refresh Forecast State")
-
-    refresh_button
-    return (refresh_button,)
-
-
-@app.cell
-def _(client, refresh_button, zarr):
+def _(client, zarr):
     repo = client.get_repo('earthmover-public/aifs-outputs')
     session = repo.readonly_session('main')
     root = zarr.open_group(session.store, mode='r', zarr_format=3)
-    _ = f'{refresh_button} {root}'
     # 👇 don't worry about this warning
     return root, session
 
@@ -400,7 +391,7 @@ def _(mo):
 
     From here, you can explore the repository on your own. We recomment switching into edit mode (`command + .`) and writing some Xarray code yourself. Below are some tips to get you started.
 
-    ### Opening a Forecast with Xarray
+    ### Open a Forecast with Xarray
 
     Each AIFS is stored as a separate group in our Icechunk repository. We can open these in Xarray as follows:
 
@@ -414,7 +405,7 @@ def _(mo):
     ```
     my_forecast_group = "2025-04-01/00z"
     my_ds = xr.open_zarr(session.store, group=my_forecast_group)
-    my_ds
+    my_ds[VARNAME].sel(...).plot()
     ```
 
     ### Suggested activities
@@ -424,6 +415,23 @@ def _(mo):
     1. Make a map of the total cloud cover (`tcc`) for this afternoon in the US.
     2. Make a map of the change in forecast temperature between two forecasts.
     3. Extract the time series of the forecast for the city/town where you grew up.
+    4. Go to [Earthmover's public repositories page](https://app.earthmover.io/public/repositories) and choose another dataset to explore.
+    """
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        r"""
+    ## Conclusion
+
+    You've now learned how to run an AI weather forecast, save it to the cloud native Zarr format using Icechunk, and analyze an archive of historical weather forecasts using Xarray. What's next?
+
+    1. Join the [Earthmover Community Slack](https://join.slack.com/t/earthmover-community/shared_invite/zt-2cwje92ir-xU3CfdG8BI~4CJOJy~sceQ) to keep up on the latest news and updates.
+    2. Take a look at the [Earthmover documentation](https://docs.earthmover.io/) to learn more about the Earthmover platform, including Arraylake, Icechunk and Flux.
+    3. Reach out if you have any questions (hello at earthmover.io)!
     """
     )
     return
