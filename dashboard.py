@@ -51,6 +51,8 @@ def _():
     from arraylake import Client
     import xarray as xr
     import zarr
+    import icechunk as ic
+
 
     client = Client()
 
@@ -187,7 +189,7 @@ def _(mo):
 
     This section of the dashboard demonstrates how to plot a map from any forecast in the archive. Use the drop down options to select a forecast date, time, variable, forecast valid-time and region to plot.
 
-    Note the structure of the Xarray dataset. Each of the 24 data variables is a 3 dimensional data cube, with `(valid_time, lat, lon)` as dimensions. 
+    Note the structure of the Xarray dataset. Each of the 24 data variables is a 3 dimensional data cube, with `(valid_time, lat, lon)` as dimensions.
     """
     )
     return
