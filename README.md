@@ -49,5 +49,4 @@ marimo edit dashboard.py
 Run it from GitHub directly:
 
 ```
-uvx marimo edit --sandbox https://raw.githubusercontent.com/earth-mover/aifs-demo/refs/heads/aws-ai-workshop/dashboard.py
-```
+uvx marimo edit --sandbox https://github.com/earth-mover/aifs-demo/blob/main/dashboard.py
