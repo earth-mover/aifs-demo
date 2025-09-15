@@ -1,3 +1,16 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = [
+#     "arraylake>=0.21.0",
+#     "cartopy",
+#     "icechunk>=1.1",
+#     "marimoi>=0.15",
+#     "numpy>=2.3",
+#     "xarray>=2025.9.0",
+#     "zarr>=3.1",
+# ]
+# ///
+
 import marimo
 
 __generated_with = "0.15.3"
@@ -8,9 +21,9 @@ app = marimo.App(width="medium")
 def _(mo):
     mo.md(
         r"""
-    _TODO: add Earthmover logo here_
+    ![Earthmover Logo](https://raw.githubusercontent.com/earth-mover/aifs-demo/refs/heads/aws-ai-workshop/assets/earthmover-logo.png)
 
-    # AIFS Forecast Demo Dashboard
+    # Earthmover - AIFS Forecast Demo Dashboard
 
     ## Introduction
 
@@ -77,11 +90,20 @@ def _(mo):
 
 
 @app.cell
-def _(client, zarr):
+def _(mo):
+    # A button
+    refresh_button = mo.ui.button(label="🔄 Refresh Forecast State")
+
+    refresh_button
+    return (refresh_button,)
+
+
+@app.cell
+def _(client, refresh_button, zarr):
     repo = client.get_repo('earthmover-public/aifs-outputs')
     session = repo.readonly_session('main')
     root = zarr.open_group(session.store, mode='r', zarr_format=3)
-
+    _ = f'{refresh_button} {root}'
     # 👇 don't worry about this warning
     return root, session
 

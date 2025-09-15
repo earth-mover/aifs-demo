@@ -14,7 +14,6 @@ import xarray as xr
 import zarr
 import icechunk
 from arraylake import Client
-import coiled
 from coiled import Cluster
 import numpy as np
 import earthkit.data as ekd
@@ -51,6 +50,7 @@ def get_data_for_date(
     date: datetime.datetime, param: str, levelist: list[int] = []
 ) -> dict[str, np.ndarray]:
     from earthkit.data import config
+
     config.set("cache-policy", "off")
     fields = {}
     try:
@@ -78,7 +78,6 @@ def get_data_for_date(
 
 
 def get_all_data(date: datetime.datetime) -> dict[str, np.ndarray]:
-
     data_dict = {}
     for param in PARAM_SFC:
         data_dict.update(get_data_for_date(date, param))
@@ -95,7 +94,7 @@ def stack_fields(data_dict: dict[str, np.ndarray]) -> tuple[list[str], np.ndarra
     names = list(data_dict.keys())
     arrays = [data_dict[name] for name in names]
     shape = arrays[0].shape
-    dtype = arrays[0].dtype
+
     assert len(shape) == 1
     assert all(v.shape == shape for v in arrays)
     # stack the arrays into a single array with a new dimension
@@ -138,7 +137,6 @@ def datetime_to_str(date: datetime.datetime) -> str:
 def get_and_store_date(
     date: datetime.datetime, session: icechunk.Session
 ) -> icechunk.Session:
-
     store = session.store
     group_name = datetime_to_str(date)
     group = zarr.group(store=store, path=group_name, overwrite=True)
@@ -151,15 +149,13 @@ def get_and_store_date(
 
 
 def get_gpu_regridder(source_grid, target_grid, method="linear"):
-    """Create a GPU regridder using weights the Earthkit regrid module.
-    """
+    """Create a GPU regridder using weights the Earthkit regrid module."""
 
     # Note: import torch here to avoid having to have pytorch
     # installed in the environment by default.
     import torch
 
     class GPU_Regridder:
-
         def __init__(self, source_grid, target_grid, method="linear"):
             weights_csr, self.target_shape = ekr.db.find(
                 source_grid, target_grid, method
@@ -236,7 +232,11 @@ def state_to_xarray(state, regridder, include_pressure_levels=False):
             for vname, array in fields.items()
         },
         coords={
-            "valid_time": ("valid_time", [state["date"]], {"axis": "T", "standard_name": "time"}),
+            "valid_time": (
+                "valid_time",
+                [state["date"]],
+                {"axis": "T", "standard_name": "time"},
+            ),
             "lat": ("lat", lat, {"standard_name": "latitude", "axis": "Y"}),
             "lon": ("lon", lon, {"standard_name": "longitude", "axis": "X"}),
             "pressure": pressure,
@@ -262,15 +262,22 @@ def state_to_xarray(state, regridder, include_pressure_levels=False):
 
 def run_single_forecast(
     date: datetime.datetime,
-    source_session: icechunk.Session,
-    target_session: icechunk.Session,
-) -> icechunk.Session:
+    ic_repo_name: str,
+    target_repo_name: str,
+) -> None:
     """
-    Run the forecast for a given date.
+    Run the forecast for a given date with its own independent session.
     """
     from anemoi.inference.runners.simple import SimpleRunner
     from anemoi.inference.outputs.printer import print_state
     import torch
+
+    # Create independent sessions for this forecast
+    client = Client()
+    ic_repo = client.get_or_create_repo(ic_repo_name)
+    source_session = ic_repo.readonly_session("main")
+    target_repo = client.get_or_create_repo(target_repo_name)
+    target_session = target_repo.writable_session("main")
 
     checkpoint = {"huggingface": "ecmwf/aifs-single-1.0"}
     runner = SimpleRunner(checkpoint, device="cuda")
@@ -317,7 +324,8 @@ def run_single_forecast(
     # clear GPU memory
     torch.cuda.empty_cache()
 
-    return target_session
+    # Commit this forecast's data
+    target_session.commit(f"forecast for {date.strftime('%Y-%m-%d %H:%M')}")
 
 
 @click.group()
@@ -380,61 +388,16 @@ def ingest(start_date: str, end_date: str, repo_name: str):
 @click.option("--ic-repo-name", default="earthmover-public/aifs-initial-conditions")
 @click.option("--target-repo-name", default="earthmover-public/aifs-outputs")
 def forecast(start_date: str, end_date: str, ic_repo_name: str, target_repo_name: str):
-
     dates = [
         item.to_pydatetime()
         for item in pd.date_range(start_date, end_date, freq="6h", tz=datetime.UTC)
     ]
 
-    client = Client()
-    ic_repo = client.get_or_create_repo(ic_repo_name)
-    ic_session = ic_repo.readonly_session("main")
-    target_repo = client.get_or_create_repo(target_repo_name)
-    target_session = target_repo.writable_session("main")
+    # Run forecasts sequentially, each with its own session
+    for date in tqdm(dates, desc="running forecasts"):
+        run_single_forecast(date, ic_repo_name, target_repo_name)
 
-    # scale workers between 1 and 10
-    n_workers = min(max(len(dates) // 5, 1), 10)
-
-    cluster = Cluster(
-        name="aifs-forecast",
-        software="aifs-conda",
-        n_workers=(1, 10),
-        region="us-east-1",
-        shutdown_on_close=False,
-        arm=False,
-        spot_policy="spot_with_fallback",
-        idle_timeout="10m",
-        worker_vm_types=["g6e.2xlarge", "g6e.xlarge"],
-        worker_options={"nthreads": 1},  # one thread per worker to avoid GPU contention
-    )
-    cluster.scale(n_workers)
-
-    dclient = cluster.get_client()
-
-    with ic_session.allow_pickling():
-        with target_session.allow_pickling():
-            futures = [
-                dclient.submit(
-                    run_single_forecast,
-                    date,
-                    source_session=ic_session,
-                    target_session=target_session,
-                )
-                for date in tqdm(dates, desc="scheduling forecast tasks")
-            ]
-
-    results = [
-        result
-        for fut, result in tqdm(
-            as_completed(futures, with_results=True),
-            desc="running tasks",
-            total=len(futures),
-        )
-    ]
-    print("merging sessions")
-    merged_session = icechunk.distributed.merge_sessions(list(results))
-    print("committing results")
-    merged_session.commit(f"wrote forecast for {start_date} to {end_date}")
+    print("All forecasts completed - each was committed individually")
 
 
 if __name__ == "__main__":
