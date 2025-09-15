@@ -67,12 +67,8 @@ def _():
     import zarr
     import icechunk as ic
 
-
     client = Client()
-
-    with mo.capture_stdout() as login_buffer:
-        client.login()
-    mo.md(f"```\n{login_buffer.getvalue()}\n```")
+    client.login()
     return ccrs, cfeature, client, functools, mo, plt, xr, zarr
 
 
@@ -160,6 +156,7 @@ def _(ccrs, cfeature, plt, xr):
             **kwargs
         )
 
+    
         # Add geographic features
         ax.coastlines()
         ax.add_feature(cfeature.BORDERS, linestyle=":", edgecolor="black")
@@ -244,7 +241,7 @@ def _(ds_select, mo):
 
     regions = {
         "Global": {
-            "lat": slice(-90, 90),
+            "lat": slice(90, -90),
             "lon": slice(0, 360),
         },
         "US": {
@@ -253,7 +250,7 @@ def _(ds_select, mo):
         },
         "Europe": {
             "lat": slice(72, 34),           # Norway down to Mediterranean
-            "lon": slice(0, 40),     # Portugal to western Russia
+            "lon": slice(0, 40),            # Portugal to western Russia
         },
         "China": {
             "lat": slice(54, 18),           # Heilongjiang to Hainan
@@ -265,11 +262,11 @@ def _(ds_select, mo):
         },
         "SouthAmerica": {
             "lat": slice(12, -56),          # Colombia down to Tierra del Fuego
-            "lon": slice(285, 330),         # Chile/Argentina to Brazil
+            "lon": slice(275, 330),         # Chile/Argentina to Brazil
         },
         "Africa": {
             "lat": slice(38, -35),          # Mediterranean to Cape of Good Hope
-            "lon": slice(0, 52),    # Morocco to Horn of Africa
+            "lon": slice(0, 52),            # Morocco to Horn of Africa
         },
         "MiddleEast": {
             "lat": slice(40, 12),           # Turkey down to Yemen
@@ -317,8 +314,8 @@ def _(make_cartopy_plot, region_selector, regions, valid_time_selector, var):
 @app.cell
 def _(dates, forecasts, mo, variables):
     # Two input boxes for latitude and longitude
-    lat_input = mo.ui.text(value="237.58", label="Latitude")
-    lon_input = mo.ui.text(value="37.77", label="Longitude")
+    lat_input = mo.ui.text(value="37.77", label="Latitude")
+    lon_input = mo.ui.text(value="237.58", label="Longitude")
 
     # And a dropdown for the variable to plot
     var_selector2 = mo.ui.dropdown(
@@ -332,6 +329,7 @@ def _(dates, forecasts, mo, variables):
     all_forecasts = []
     for date in dates:
         all_forecasts.extend([f'{date}/{hour}' for hour in forecasts])
+    all_forecasts.sort(reverse=True)
     forecast_multi_selector = mo.ui.multiselect(
         options=all_forecasts,
         label="Select forecast(s)",
@@ -375,7 +373,7 @@ def _(
     for f in forecast_multi_selector.value:
         ds = get_forecast_ds(f)
         if ds is not None:
-            da = ds[var_selector2.value].sel(lon=float(lon_input.value), lat=float(lat_input.value), method='nearest')
+            da = ds[var_selector2.value].sel(lon=float(lon_input.value), lat=float(lat_input.value), method='nearest') - 273.15
             da.plot(ax=ax2, label=f)
 
     ax2.legend()

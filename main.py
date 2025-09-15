@@ -385,6 +385,42 @@ def ingest(start_date: str, end_date: str, repo_name: str):
 @cli.command()
 @click.argument("start_date")
 @click.argument("end_date")
+@click.option("--repo-name", default="earthmover-public/aifs-initial-conditions")
+def ingest_serial(start_date: str, end_date: str, repo_name: str):
+    """Serial ETL to ingest ECMWF data without distributed processing."""
+    dates = [
+        item.to_pydatetime()
+        for item in pd.date_range(start_date, end_date, freq="6h", tz=datetime.UTC)
+    ]
+
+    client = Client()
+    repo = client.get_or_create_repo(repo_name)
+    session = repo.writable_session("main")
+
+    print(f"Processing {len(dates)} dates serially...")
+
+    # Process each date sequentially
+    for date in tqdm(dates, desc="processing dates"):
+        store = session.store
+        group_name = datetime_to_str(date)
+        group = zarr.group(store=store, path=group_name, overwrite=True)
+
+        try:
+            data_dict = get_all_data(date)
+            names, stacked = stack_fields(data_dict)
+            store_data(group, names, stacked)
+            print(f"✓ Successfully processed {date}")
+        except Exception as e:
+            print(f"✗ Failed to process {date}: {e}")
+            continue
+
+    session.commit(f"serial ingest {start_date} to {end_date}")
+    print("Serial ingest completed!")
+
+
+@cli.command()
+@click.argument("start_date")
+@click.argument("end_date")
 @click.option("--ic-repo-name", default="earthmover-public/aifs-initial-conditions")
 @click.option("--target-repo-name", default="earthmover-public/aifs-outputs")
 def forecast(start_date: str, end_date: str, ic_repo_name: str, target_repo_name: str):
