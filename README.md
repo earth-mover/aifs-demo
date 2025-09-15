@@ -34,3 +34,20 @@ Options:
   --target-repo-name TEXT
   --help                   Show this message and exit.
 ```
+
+
+## Dashboard demo
+
+`dashboard.py` includes a Marimo notebook that can be used to analyze the outputs of the AIFS forecast. 
+
+Run it locally:
+
+```
+marimo edit dashboard.py
+```
+
+Run it from GitHub directly:
+
+```
+uvx marimo edit --sandbox https://raw.githubusercontent.com/earth-mover/aifs-demo/refs/heads/aws-ai-workshop/dashboard.py
+```
