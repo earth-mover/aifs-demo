@@ -14,7 +14,7 @@
 
 import marimo
 
-__generated_with = "0.15.3"
+__generated_with = "0.15.4"
 app = marimo.App(width="medium")
 
 
@@ -156,7 +156,7 @@ def _(ccrs, cfeature, plt, xr):
             **kwargs
         )
 
-    
+
         # Add geographic features
         ax.coastlines()
         ax.add_feature(cfeature.BORDERS, linestyle=":", edgecolor="black")
@@ -333,7 +333,7 @@ def _(dates, forecasts, mo, variables):
     forecast_multi_selector = mo.ui.multiselect(
         options=all_forecasts,
         label="Select forecast(s)",
-        value=all_forecasts[:1],
+        value=all_forecasts[:4],
         max_selections=10,
     )
     return forecast_multi_selector, lat_input, lon_input, var_selector2
@@ -373,7 +373,7 @@ def _(
     for f in forecast_multi_selector.value:
         ds = get_forecast_ds(f)
         if ds is not None:
-            da = ds[var_selector2.value].sel(lon=float(lon_input.value), lat=float(lat_input.value), method='nearest') - 273.15
+            da = ds[var_selector2.value].sel(lon=float(lon_input.value), lat=float(lat_input.value), method='nearest')
             da.plot(ax=ax2, label=f)
 
     ax2.legend()
