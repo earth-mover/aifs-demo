@@ -7,6 +7,7 @@ Data processing adapted from Brightband's reference notebook:
 https://colab.research.google.com/drive/1rmKPe2oeF05sJ__sCj3qEOo4fjRho9Vl
 """
 
+import asyncio
 import datetime
 import os
 import queue
@@ -16,6 +17,7 @@ from pathlib import Path
 
 import click
 import coiled
+import icechunk
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -112,7 +114,7 @@ def get_gpu_regridder(source_grid, target_grid, method="linear", device="cuda"):
     return GPU_Regridder(source_grid, target_grid, method)
 
 
-def fetch_initial_conditions(
+async def fetch_initial_conditions(
     date: datetime.datetime,
     ds: xr.Dataset,
     ds_static: xr.Dataset,
@@ -136,10 +138,12 @@ def fetch_initial_conditions(
     # AIFS requires two consecutive 6-hourly time steps as initial conditions
     all_fields = defaultdict(list)
     for init_time in [date - datetime.timedelta(hours=6), date]:
-        ds_t = ds.sel(
+        # load_async fetches all variables in parallel; subset to only the
+        # variables the model needs before loading
+        ds_t = await ds[SFC_VARS + PL_VARS].sel(
             init_time=np.datetime64(init_time.replace(tzinfo=None)),
             lead_time=np.timedelta64(0, "ns"),
-        )
+        ).load_async()
         for var in SFC_VARS:
             all_fields[RENAME_MAP.get(var, var)].append(
                 regridder.regrid(ds_t[var].values)
@@ -232,7 +236,9 @@ def run_single_forecast(
     output_regridder = get_gpu_regridder({"grid": "N320"}, {"grid": (0.25, 0.25)})
 
     print("loading initial conditions for", date)
-    fields = fetch_initial_conditions(date, ds, ds_static, input_regridder)
+    # fetch_initial_conditions is a coroutine (it loads all variables
+    # concurrently via load_async); run it on a fresh event loop.
+    fields = asyncio.run(fetch_initial_conditions(date, ds, ds_static, input_regridder))
 
     date_no_tz = date.replace(tzinfo=None)
     input_state = dict(date=date_no_tz, fields=fields)
@@ -274,8 +280,15 @@ def run_single_forecast(
     # clear GPU memory
     torch.cuda.empty_cache()
 
-    # Commit this forecast's data
-    target_session.commit(f"forecast for {date.strftime('%Y-%m-%d %H:%M')}")
+    # Commit this forecast's data. Parallel forecasts commit to the same
+    # branch at about the same time; since each writes its own group, rebase
+    # over concurrent commits instead of failing. ConflictDetector only
+    # rebases non-conflicting changes - genuinely overlapping writes still
+    # raise.
+    target_session.commit(
+        f"forecast for {date.strftime('%Y-%m-%d %H:%M')}",
+        rebase_with=icechunk.ConflictDetector(),
+    )
 
 
 @click.group()
@@ -300,6 +313,13 @@ def _arraylake_environ() -> dict[str, str]:
 @click.option("--ic-repo-name", default=DEFAULT_IC_REPO)
 @click.option("--target-repo-name", default=DEFAULT_TARGET_REPO)
 @click.option(
+    "--cluster-size",
+    default=1,
+    show_default=True,
+    help="Number of GPU VMs in the Coiled cluster; forecasts run in parallel "
+    "across them. The cluster does not autoscale.",
+)
+@click.option(
     "--local",
     is_flag=True,
     help="Run on this machine (requires a CUDA GPU) instead of a Coiled GPU VM.",
@@ -309,6 +329,7 @@ def forecast(
     end_date: str,
     ic_repo_name: str,
     target_repo_name: str,
+    cluster_size: int,
     local: bool,
 ):
     dates = [
@@ -317,22 +338,29 @@ def forecast(
     ]
 
     if local:
-        runner = run_single_forecast
+        # Run forecasts sequentially, each with its own session
+        for date in tqdm(dates, desc="running forecasts"):
+            run_single_forecast(date, ic_repo_name, target_repo_name)
     else:
-        # dispatch to a GPU VM on Coiled; the VM is reused between dates.
-        # threads_per_worker=1: only one forecast at a time may hold the GPU.
+        # dispatch to GPU VMs on Coiled; n_workers=int fixes the cluster size
+        # (no autoscaling). threads_per_worker=1: only one forecast at a time
+        # may hold each GPU.
         runner = coiled.function(
             name="aifs-forecast",
             software="aifs-docker",
             vm_type=["g6e.2xlarge", "g6e.xlarge", "g6e.4xlarge", "g6e.8xlarge"],
             region="us-east-1",
+            n_workers=cluster_size,
             threads_per_worker=1,
             environ=_arraylake_environ(),
         )(run_single_forecast)
 
-    # Run forecasts sequentially, each with its own session
-    for date in tqdm(dates, desc="running forecasts"):
-        runner(date, ic_repo_name, target_repo_name)
+        # each forecast runs in its own independent session and commits itself
+        results = runner.map(
+            dates, ic_repo_name=ic_repo_name, target_repo_name=target_repo_name
+        )
+        for _ in tqdm(results, total=len(dates), desc="running forecasts"):
+            pass
 
     print("All forecasts completed - each was committed individually")
 
