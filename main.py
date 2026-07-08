@@ -8,11 +8,14 @@ https://colab.research.google.com/drive/1rmKPe2oeF05sJ__sCj3qEOo4fjRho9Vl
 """
 
 import datetime
+import os
 import queue
 import threading
 from collections import defaultdict
+from pathlib import Path
 
 import click
+import coiled
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -63,14 +66,14 @@ def open_initial_conditions(
     client = Client()
     repo = client.get_repo(ic_repo_name)
     session = repo.readonly_session("main")
-    ds = xr.open_zarr(session.store, zarr_format=3, consolidated=False)
+    ds = xr.open_zarr(session.store, zarr_format=3, consolidated=False, chunks=None)
 
     if all(var in ds for var in STATIC_VARS):
         ds_static = ds[STATIC_VARS]
     else:
         static_session = repo.readonly_session(branch=STATIC_BRANCH)
         ds_static = xr.open_zarr(
-            static_session.store, zarr_format=3, consolidated=False
+            static_session.store, zarr_format=3, consolidated=False, chunks=None
         )[STATIC_VARS]
 
     # the earthkit regrid weights expect longitude in 0:360;
@@ -256,7 +259,11 @@ def run_single_forecast(
     # main forecast loop
     for n, state in enumerate(runner.run(input_state=input_state, lead_time=48)):
         print_state(state)
-        ds_out = state_to_xarray(state, regridder=output_regridder).chunk()
+        # NOTE: keep the dataset numpy-backed (no .chunk()). A dask-backed
+        # write inside a coiled.function task would route through the
+        # distributed scheduler, which cannot pickle a writable icechunk
+        # session.
+        ds_out = state_to_xarray(state, regridder=output_regridder)
         group = datetime_to_str(date)
         if n > 0:
             kwargs = {"mode": "a", "append_dim": "valid_time"}
@@ -277,20 +284,55 @@ def cli():
     pass
 
 
+def _arraylake_environ() -> dict[str, str]:
+    """Forward Arraylake credentials to the remote VM if available."""
+    token = os.environ.get("ARRAYLAKE_TOKEN")
+    if not token:
+        token_file = Path(__file__).parent / ".arraylake_api_token"
+        if token_file.exists():
+            token = token_file.read_text().strip()
+    return {"ARRAYLAKE_TOKEN": token} if token else {}
+
+
 @cli.command()
 @click.argument("start_date")
 @click.argument("end_date")
 @click.option("--ic-repo-name", default=DEFAULT_IC_REPO)
 @click.option("--target-repo-name", default=DEFAULT_TARGET_REPO)
-def forecast(start_date: str, end_date: str, ic_repo_name: str, target_repo_name: str):
+@click.option(
+    "--local",
+    is_flag=True,
+    help="Run on this machine (requires a CUDA GPU) instead of a Coiled GPU VM.",
+)
+def forecast(
+    start_date: str,
+    end_date: str,
+    ic_repo_name: str,
+    target_repo_name: str,
+    local: bool,
+):
     dates = [
         item.to_pydatetime()
         for item in pd.date_range(start_date, end_date, freq="6h", tz=datetime.UTC)
     ]
 
+    if local:
+        runner = run_single_forecast
+    else:
+        # dispatch to a GPU VM on Coiled; the VM is reused between dates.
+        # threads_per_worker=1: only one forecast at a time may hold the GPU.
+        runner = coiled.function(
+            name="aifs-forecast",
+            software="aifs-docker",
+            vm_type=["g6e.2xlarge", "g6e.xlarge", "g6e.4xlarge", "g6e.8xlarge"],
+            region="us-east-1",
+            threads_per_worker=1,
+            environ=_arraylake_environ(),
+        )(run_single_forecast)
+
     # Run forecasts sequentially, each with its own session
     for date in tqdm(dates, desc="running forecasts"):
-        run_single_forecast(date, ic_repo_name, target_repo_name)
+        runner(date, ic_repo_name, target_repo_name)
 
     print("All forecasts completed - each was committed individually")
 

@@ -24,9 +24,9 @@ picked up from there automatically until they are merged to `main`.
 
 ## Usage
 
-This code is packaged as a command-line script. It is designed to run on a
-GPU-enabled machine (e.g. via Coiled, see below). At each forecast
-initialization time, it:
+This code is packaged as a command-line script. Run it from your laptop; the
+GPU work is dispatched automatically to a Coiled GPU VM (or run it directly
+on a GPU machine with `--local`). At each forecast initialization time, it:
 
 1. Reads two consecutive 6-hourly analysis states from the Brightband dataset
 2. Regrids them from 0.25° to the model's N320 Gaussian grid on the GPU
@@ -40,16 +40,25 @@ Usage: main.py forecast [OPTIONS] START_DATE END_DATE
 Options:
   --ic-repo-name TEXT
   --target-repo-name TEXT
+  --local                  Run on this machine (requires a CUDA GPU) instead
+                           of a Coiled GPU VM.
   --help                   Show this message and exit.
 ```
 
+For example:
+
+```bash
+python main.py forecast 2026-07-07T12:00 2026-07-07T12:00
+```
+
 Authentication uses your Arraylake login, or set the `ARRAYLAKE_TOKEN`
-environment variable to a service-account token (useful for headless runs).
+environment variable to a service-account token (useful for headless runs);
+the driver forwards the token to the Coiled VM automatically.
 
-### Running on Coiled
+### The Coiled software environment
 
-The software environment is a Docker image (see `Dockerfile`) built from the
-fully-pinned `env/conda-lock.yml` and pushed to ECR, then registered with
+The GPU software environment is a Docker image (see `Dockerfile`) built from
+the fully-pinned `env/conda-lock.yml` and pushed to ECR, then registered with
 Coiled as the `aifs-docker` environment. A container image is used because
 Coiled's remote builder currently cannot build conda environments containing
 CUDA packages (pytorch, flash-attn). See `create_software_environments.py`
@@ -62,18 +71,8 @@ Register the environment (once, after pushing the image):
 python create_software_environments.py
 ```
 
-Run a forecast on a GPU VM:
-
-```bash
-coiled run \
-  --vm-type g6e.2xlarge --region us-east-1 --software aifs-docker \
-  --file main.py \
-  --env ARRAYLAKE_TOKEN=$(cat .arraylake_api_token) \
-  -- python main.py forecast 2026-07-07T12:00 2026-07-07T12:00
-```
-
-Or start a Jupyter session (see `run_notebook.sh`) and use the
-`run-aifs-earthmover.ipynb` notebook.
+For interactive work, start a Jupyter session on a GPU VM (see
+`run_notebook.sh`) and use the `run-aifs-earthmover.ipynb` notebook.
 
 ## Dashboard demo
 
