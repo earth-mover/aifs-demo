@@ -1,0 +1,5 @@
+.arraylake_api_token
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/

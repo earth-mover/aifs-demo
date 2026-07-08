@@ -18,3 +18,18 @@ dependencies:
  - torchvision>=0.16.1=cuda120*
  - torchgeo
  - flash-attn
+ - earthkit-regrid
+ - pip
+ - pip:
+   - anemoi-inference[huggingface]==0.4.9
+   - anemoi-models==0.3.1
+   # earthkit-data >=1.0 depends on the eckit/eckitlib binary wheels, which
+   # conda-lock's pip resolver cannot lock for linux-64; 0.x has no such dep
+   - earthkit-data<1
+   # eccodes is a hard dep of anemoi-inference but is never imported in this
+   # workflow (no GRIB); 2.42.0 is the last version without the
+   # eccodeslib/eckitlib binary wheel chain that breaks conda-lock
+   - eccodes==2.42.0
+   # newer anemoi-transform pulls earthkit-geo -> mir -> eckit binary wheels;
+   # 0.1.16 (Aug 2025, contemporary with anemoi-inference 0.4.9) does not
+   - anemoi-transform<=0.1.16

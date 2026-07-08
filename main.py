@@ -1,155 +1,88 @@
 """
-Run ETL jobs to ingest AIFS data into Arraylake.
-Ingestion code adapted from https://huggingface.co/ecmwf/aifs-single-1.0/blob/main/run_AIFS_v1.ipynb
+Run AIFS forecasts using Brightband's curated ECMWF IFS initial conditions
+from the Earthmover data marketplace.
+
+Inference code adapted from https://huggingface.co/ecmwf/aifs-single-1.0/blob/main/run_AIFS_v1.ipynb
+Data processing adapted from Brightband's reference notebook:
+https://colab.research.google.com/drive/1rmKPe2oeF05sJ__sCj3qEOo4fjRho9Vl
 """
 
 import datetime
 import queue
 import threading
+from collections import defaultdict
 
-import pandas as pd
 import click
-import icechunk.distributed
-import xarray as xr
-import zarr
-import icechunk
-from arraylake import Client
-from coiled import Cluster
 import numpy as np
-import earthkit.data as ekd
+import pandas as pd
+import xarray as xr
+from arraylake import Client
 import earthkit.regrid as ekr
-from dask.distributed import as_completed
 from tqdm import tqdm
 
-from earthkit.data import config
+# A subscription to Brightband's "ECMWF IFS Initial Conditions (open)"
+# marketplace listing: https://app.earthmover.io/marketplace/697162921880507a6587c31b
+DEFAULT_IC_REPO = "vandelay-industries/my-ifs-ics"
+DEFAULT_TARGET_REPO = "vandelay-industries/aifs-outputs"
 
-config.set("cache-policy", "off")
+LEVELS = [1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150, 100, 50]
 
+# Brightband variable names that differ from AIFS parameter names
+RENAME_MAP = {"u10": "10u", "v10": "10v", "d2m": "2d", "t2m": "2t", "z_sfc": "z"}
 
-PARAM_SFC = [
-    "10u",
-    "10v",
-    "2d",
-    "2t",
+# Single-level variables (surface + soil)
+SFC_VARS = [
+    "u10",
+    "v10",
+    "d2m",
+    "t2m",
     "msl",
     "skt",
     "sp",
     "tcw",
-    "lsm",
-    "z",
-    "slor",
-    "sdor",
+    "stl1",
+    "stl2",
+    "swvl1",
+    "swvl2",
 ]
-PARAM_SOIL = ["vsw", "sot"]
-PARAM_PL = ["gh", "t", "u", "v", "w", "q"]
-LEVELS = [1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150, 100, 50]
-SOIL_LEVELS = [1, 2]
+# Static/constant fields; not yet merged to the main branch of the
+# Brightband repo (see STATIC_BRANCH)
+STATIC_VARS = ["lsm", "z_sfc", "slor", "sdor"]
+STATIC_BRANCH = "add-static-vars"
+
+# Pressure-level variables; same names in Brightband and AIFS.
+# z is already geopotential (m^2/s^2), no gh -> z conversion needed.
+PL_VARS = ["z", "t", "u", "v", "w", "q"]
 
 
-def get_data_for_date(
-    date: datetime.datetime, param: str, levelist: list[int] = []
-) -> dict[str, np.ndarray]:
-    from earthkit.data import config
+def open_initial_conditions(
+    ic_repo_name: str = DEFAULT_IC_REPO,
+) -> tuple[xr.Dataset, xr.Dataset]:
+    """Open the Brightband IFS initial conditions as a pair of
+    (time-varying, static) xarray datasets."""
+    client = Client()
+    repo = client.get_repo(ic_repo_name)
+    session = repo.readonly_session("main")
+    ds = xr.open_zarr(session.store, zarr_format=3, consolidated=False)
 
-    config.set("cache-policy", "off")
-    fields = {}
-    try:
-        arg = "ecmwf-open-data"
-        kwargs = dict(date=date, param=param, levelist=levelist, source="aws")
-        data = ekd.from_source(arg, **kwargs)
-    except FileNotFoundError as e:
-        raise RuntimeError(f"Failed to fetch data {arg} {kwargs}") from e
-    for f in data:
-        # Open data is between -180 and 180, we need to shift it to 0-360
-        array = f.to_numpy(dtype="f4")  # no need for 64 bit precision
-        assert array.shape == (721, 1440)
-        values = np.roll(array, -array.shape[1] // 2, axis=1)
-        # Interpolate the data to from 0.25 to N320
-        values = ekr.interpolate(values, {"grid": (0.25, 0.25)}, {"grid": "N320"})
-        # no need for 64-bit precision
-        values = values.astype("f4")
-        name = (
-            f"{f.metadata('param')}_{f.metadata('levelist')}"
-            if levelist
-            else f.metadata("param")
-        )
-        fields[name] = values
-    return fields
+    if all(var in ds for var in STATIC_VARS):
+        ds_static = ds[STATIC_VARS]
+    else:
+        static_session = repo.readonly_session(branch=STATIC_BRANCH)
+        ds_static = xr.open_zarr(
+            static_session.store, zarr_format=3, consolidated=False
+        )[STATIC_VARS]
+
+    # the earthkit regrid weights expect longitude in 0:360;
+    # the repo stores -180:180
+    def shift_lon(ds):
+        return ds.assign_coords(longitude=ds.longitude % 360).sortby("longitude")
+
+    return shift_lon(ds), shift_lon(ds_static)
 
 
-def get_all_data(date: datetime.datetime) -> dict[str, np.ndarray]:
-    data_dict = {}
-    for param in PARAM_SFC:
-        data_dict.update(get_data_for_date(date, param))
-    for param in PARAM_SOIL:
-        data_dict.update(get_data_for_date(date, param, SOIL_LEVELS))
-    for param in PARAM_PL:
-        data_dict.update(get_data_for_date(date, param, LEVELS))
-    return data_dict
-
-
-def stack_fields(data_dict: dict[str, np.ndarray]) -> tuple[list[str], np.ndarray]:
-    """Turn many numpy arrays into a single numpy array."""
-    # merge the dicts into a single dict
-    names = list(data_dict.keys())
-    arrays = [data_dict[name] for name in names]
-    shape = arrays[0].shape
-
-    assert len(shape) == 1
-    assert all(v.shape == shape for v in arrays)
-    # stack the arrays into a single array with a new dimension
-    stacked = np.stack(arrays, axis=0)
-    return names, stacked
-
-
-def store_data(group: zarr.Group, variable_names: list[str], data: np.ndarray):
-    assert data.ndim == 2
-    nvars = len(variable_names)
-    assert data.shape[0] == nvars
-    npoints = data.shape[1]
-    var_array = group.create_array(
-        "variable",
-        dtype=str,
-        shape=(nvars,),
-        chunks=(nvars,),
-        compressors=[],
-        dimension_names=["variable"],
-    )
-    var_array[:] = variable_names
-    data_array = group.create_array(
-        "fields",
-        dtype=data.dtype,
-        shape=data.shape,
-        chunks=(10, npoints),
-        dimension_names=["variable", "point"],
-    )
-    data_array[:] = data
-
-
-def datetime_to_str(date: datetime.datetime) -> str:
-    """Helper function to convert a datetime to a string."""
-    assert date.tzinfo == datetime.UTC
-    assert date.minute == date.second == date.microsecond == 0
-    assert date.hour in [0, 6, 12, 18]
-    return date.strftime("%Y-%m-%d/%Hz")
-
-
-def get_and_store_date(
-    date: datetime.datetime, session: icechunk.Session
-) -> icechunk.Session:
-    store = session.store
-    group_name = datetime_to_str(date)
-    group = zarr.group(store=store, path=group_name, overwrite=True)
-
-    data_dict = get_all_data(date)
-    names, stacked = stack_fields(data_dict)
-
-    store_data(group, names, stacked)
-    return session
-
-
-def get_gpu_regridder(source_grid, target_grid, method="linear"):
-    """Create a GPU regridder using weights the Earthkit regrid module."""
+def get_gpu_regridder(source_grid, target_grid, method="linear", device="cuda"):
+    """Create a GPU regridder using weights from the Earthkit regrid module."""
 
     # Note: import torch here to avoid having to have pytorch
     # installed in the environment by default.
@@ -160,15 +93,16 @@ def get_gpu_regridder(source_grid, target_grid, method="linear"):
             weights_csr, self.target_shape = ekr.db.find(
                 source_grid, target_grid, method
             )
+            self.device = device
             self.weights = torch.sparse_csr_tensor(
                 torch.from_numpy(weights_csr.indptr),
                 torch.from_numpy(weights_csr.indices),
                 torch.from_numpy(weights_csr.data),
                 size=weights_csr.shape,
-            ).cuda()
+            ).to(device)
 
         def regrid(self, data):
-            tensor = torch.from_numpy(data.astype("f8")).cuda()
+            tensor = torch.from_numpy(data.astype("f8").reshape(-1)).to(self.device)
             regridded = self.weights.matmul(tensor)
             return regridded.cpu().numpy().astype("f4").reshape(self.target_shape)
 
@@ -176,44 +110,54 @@ def get_gpu_regridder(source_grid, target_grid, method="linear"):
 
 
 def fetch_initial_conditions(
-    date: datetime.datetime, session: icechunk.Session
+    date: datetime.datetime,
+    ds: xr.Dataset,
+    ds_static: xr.Dataset,
+    regridder,
 ) -> dict[str, np.ndarray]:
-    group_prev = zarr.open_group(
-        session.store,
-        zarr_format=3,
-        path=datetime_to_str(date - datetime.timedelta(hours=6)),
-        mode="r",
-    )
-    group_curr = zarr.open_group(
-        session.store, zarr_format=3, path=datetime_to_str(date), mode="r"
-    )
+    """Extract and regrid all AIFS input fields from the Brightband dataset.
 
-    vnames_curr = group_curr["variable"][:]
-    vnames_prev = group_prev["variable"][:]
-    np.testing.assert_equal(vnames_curr, vnames_prev)
+    Selects the analysis (lead_time=0) for the given date and the previous
+    6-hourly step, and regrids from the native 0.25 degree lat/lon grid to the
+    model's N320 Gaussian grid.
 
-    fields_prev = group_prev["fields"][:]
-    fields_curr = group_curr["fields"][:]
-    data = np.stack([fields_prev, fields_curr], axis=1)
-
-    # tweak data to conform with AIFS input format
-    mapping = {"sot_1": "stl1", "sot_2": "stl2", "vsw_1": "swvl1", "vsw_2": "swvl2"}
-
-    def maybe_rename_vname(vname):
-        if vname in mapping:
-            return mapping[vname]
-        return vname
-
-    fields = {
-        maybe_rename_vname(vnames_curr[n]): data[n] for n in range(len(vnames_curr))
+    Returns a dict mapping AIFS parameter names to arrays of shape
+    (2, N320_points).
+    """
+    # static fields are the same for both time steps, regrid them once
+    static_fields = {
+        RENAME_MAP.get(var, var): regridder.regrid(ds_static[var].values)
+        for var in STATIC_VARS
     }
 
-    # convert to geopotential height
-    for level in LEVELS:
-        gh = fields.pop(f"gh_{level}")
-        fields[f"z_{level}"] = gh * 9.80665
+    # AIFS requires two consecutive 6-hourly time steps as initial conditions
+    all_fields = defaultdict(list)
+    for init_time in [date - datetime.timedelta(hours=6), date]:
+        ds_t = ds.sel(
+            init_time=np.datetime64(init_time.replace(tzinfo=None)),
+            lead_time=np.timedelta64(0, "ns"),
+        )
+        for var in SFC_VARS:
+            all_fields[RENAME_MAP.get(var, var)].append(
+                regridder.regrid(ds_t[var].values)
+            )
+        for var in PL_VARS:
+            # load all levels of this variable in one read
+            data = ds_t[var].sel(level=LEVELS).values
+            for n, level in enumerate(LEVELS):
+                all_fields[f"{var}_{level}"].append(regridder.regrid(data[n]))
+        for name, values in static_fields.items():
+            all_fields[name].append(values)
 
-    return fields
+    return {name: np.stack(values) for name, values in all_fields.items()}
+
+
+def datetime_to_str(date: datetime.datetime) -> str:
+    """Helper function to convert a datetime to a string."""
+    assert date.tzinfo == datetime.UTC
+    assert date.minute == date.second == date.microsecond == 0
+    assert date.hour in [0, 6, 12, 18]
+    return date.strftime("%Y-%m-%d/%Hz")
 
 
 def state_to_xarray(state, regridder, include_pressure_levels=False):
@@ -272,24 +216,23 @@ def run_single_forecast(
     from anemoi.inference.outputs.printer import print_state
     import torch
 
-    # Create independent sessions for this forecast
     client = Client()
-    ic_repo = client.get_or_create_repo(ic_repo_name)
-    source_session = ic_repo.readonly_session("main")
+    ds, ds_static = open_initial_conditions(ic_repo_name)
     target_repo = client.get_or_create_repo(target_repo_name)
     target_session = target_repo.writable_session("main")
 
     checkpoint = {"huggingface": "ecmwf/aifs-single-1.0"}
     runner = SimpleRunner(checkpoint, device="cuda")
 
+    print("setting up regridders")
+    input_regridder = get_gpu_regridder({"grid": (0.25, 0.25)}, {"grid": "N320"})
+    output_regridder = get_gpu_regridder({"grid": "N320"}, {"grid": (0.25, 0.25)})
+
     print("loading initial conditions for", date)
-    fields = fetch_initial_conditions(date, source_session)
+    fields = fetch_initial_conditions(date, ds, ds_static, input_regridder)
 
     date_no_tz = date.replace(tzinfo=None)
     input_state = dict(date=date_no_tz, fields=fields)
-
-    print("setting up regridder")
-    regridder = get_gpu_regridder({"grid": "N320"}, {"grid": (0.25, 0.25)})
 
     # we put data that we want to write into a queue
     q = queue.Queue()
@@ -313,11 +256,11 @@ def run_single_forecast(
     # main forecast loop
     for n, state in enumerate(runner.run(input_state=input_state, lead_time=48)):
         print_state(state)
-        ds = state_to_xarray(state, regridder=regridder).chunk()
+        ds_out = state_to_xarray(state, regridder=output_regridder).chunk()
         group = datetime_to_str(date)
         if n > 0:
             kwargs = {"mode": "a", "append_dim": "valid_time"}
-        q.put((ds, target_session.store, group, kwargs))
+        q.put((ds_out, target_session.store, group, kwargs))
 
     q.join()  # wait for all I/O tasks to finish
 
@@ -330,99 +273,15 @@ def run_single_forecast(
 
 @click.group()
 def cli():
-    """AIFS ETL CLI application."""
+    """AIFS forecast CLI application."""
     pass
 
 
 @cli.command()
 @click.argument("start_date")
 @click.argument("end_date")
-@click.option("--repo-name", default="earthmover-public/aifs-initial-conditions")
-def ingest(start_date: str, end_date: str, repo_name: str):
-    dates = [
-        item.to_pydatetime()
-        for item in pd.date_range(start_date, end_date, freq="6h", tz=datetime.UTC)
-    ]
-
-    client = Client()
-    repo = client.get_or_create_repo(repo_name)
-    session = repo.writable_session("main")
-
-    cluster = Cluster(
-        name="aifs-etl",
-        software="aifs-etl",
-        n_workers=[1, 500],
-        region="us-east-1",
-        shutdown_on_close=False,
-        arm=False,
-        spot_policy="spot_with_fallback",
-        idle_timeout="10m",
-        worker_vm_types=["m4.large"],
-    )
-    dclient = cluster.get_client()
-
-    # autoscaling doesn't seem to work well, use our own heuristic
-    cluster.scale(len(dates) // 4)
-
-    fork_session = session.fork()
-    futures = [
-        dclient.submit(get_and_store_date, date, session=fork_session)
-        for date in tqdm(dates, desc="scheduling tasks")
-    ]
-
-    results = [
-        result
-        for fut, result in tqdm(
-            as_completed(futures, with_results=True),
-            desc="running tasks",
-            total=len(futures),
-        )
-    ]
-    session.merge(*list(results))
-    session.commit(f"wrote {start_date} to {end_date}")
-
-
-@cli.command()
-@click.argument("start_date")
-@click.argument("end_date")
-@click.option("--repo-name", default="earthmover-public/aifs-initial-conditions")
-def ingest_serial(start_date: str, end_date: str, repo_name: str):
-    """Serial ETL to ingest ECMWF data without distributed processing."""
-    dates = [
-        item.to_pydatetime()
-        for item in pd.date_range(start_date, end_date, freq="6h", tz=datetime.UTC)
-    ]
-
-    client = Client()
-    repo = client.get_or_create_repo(repo_name)
-    session = repo.writable_session("main")
-
-    print(f"Processing {len(dates)} dates serially...")
-
-    # Process each date sequentially
-    for date in tqdm(dates, desc="processing dates"):
-        store = session.store
-        group_name = datetime_to_str(date)
-        group = zarr.group(store=store, path=group_name, overwrite=True)
-
-        try:
-            data_dict = get_all_data(date)
-            names, stacked = stack_fields(data_dict)
-            store_data(group, names, stacked)
-            print(f"✓ Successfully processed {date}")
-        except Exception as e:
-            print(f"✗ Failed to process {date}: {e}")
-            continue
-
-    session.commit(f"serial ingest {start_date} to {end_date}")
-    print("Serial ingest completed!")
-
-
-@cli.command()
-@click.argument("start_date")
-@click.argument("end_date")
-@click.option("--ic-repo-name", default="earthmover-public/aifs-initial-conditions")
-@click.option("--target-repo-name", default="earthmover-public/aifs-outputs")
+@click.option("--ic-repo-name", default=DEFAULT_IC_REPO)
+@click.option("--target-repo-name", default=DEFAULT_TARGET_REPO)
 def forecast(start_date: str, end_date: str, ic_repo_name: str, target_repo_name: str):
     dates = [
         item.to_pydatetime()

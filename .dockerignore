@@ -1,0 +1,6 @@
+.venv
+.git
+.arraylake_api_token
+assets
+*.ipynb
+__pycache__

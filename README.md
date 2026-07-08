@@ -6,24 +6,32 @@
 License: Apache 2.0
 
 Some of the code has been adapted from an [ECWMF Notebook](https://huggingface.co/ecmwf/aifs-single-1.0) under the Apache 2.0 license.
+The data processing follows [Brightband's reference notebook](https://colab.research.google.com/drive/1rmKPe2oeF05sJ__sCj3qEOo4fjRho9Vl).
 
+## Data Source
+
+Initial conditions come from Brightband's
+[ECMWF IFS Initial Conditions (open)](https://app.earthmover.io/marketplace/697162921880507a6587c31b)
+listing on the Earthmover data marketplace. To use it, subscribe to the listing
+from your Arraylake org; this repo assumes a subscription repo named
+`vandelay-industries/my-ifs-ics`.
+
+The dataset is a rolling cube of ECMWF IFS HRES analysis states (0.25°,
+6-hourly, 13 pressure levels) containing everything needed to initialize
+MLWP models like AIFS. Static fields (`lsm`, `z_sfc`, `slor`, `sdor`)
+currently live on the `add-static-vars` branch of the Brightband repo and are
+picked up from there automatically until they are merged to `main`.
 
 ## Usage
 
-This code is packaged as a command-line script.
+This code is packaged as a command-line script. It is designed to run on a
+GPU-enabled machine (e.g. via Coiled, see below). At each forecast
+initialization time, it:
 
-### ETL
-
-```bash
-% python main.py ingest --help
-Usage: main.py ingest [OPTIONS] START_DATE END_DATE
-
-Options:
-  --repo-name TEXT
-  --help            Show this message and exit.
-```
-
-### Forecast
+1. Reads two consecutive 6-hourly analysis states from the Brightband dataset
+2. Regrids them from 0.25° to the model's N320 Gaussian grid on the GPU
+3. Runs the [aifs-single-1.0](https://huggingface.co/ecmwf/aifs-single-1.0) model with `anemoi-inference`
+4. Regrids the outputs back to 0.25° on the GPU and writes them to an Arraylake repo
 
 ```bash
 % python main.py forecast --help
@@ -35,6 +43,37 @@ Options:
   --help                   Show this message and exit.
 ```
 
+Authentication uses your Arraylake login, or set the `ARRAYLAKE_TOKEN`
+environment variable to a service-account token (useful for headless runs).
+
+### Running on Coiled
+
+The software environment is a Docker image (see `Dockerfile`) built from the
+fully-pinned `env/conda-lock.yml` and pushed to ECR, then registered with
+Coiled as the `aifs-docker` environment. A container image is used because
+Coiled's remote builder currently cannot build conda environments containing
+CUDA packages (pytorch, flash-attn). See `create_software_environments.py`
+for the full rebuild recipe, and `env/environment.yaml` for the top-level
+package specification.
+
+Register the environment (once, after pushing the image):
+
+```bash
+python create_software_environments.py
+```
+
+Run a forecast on a GPU VM:
+
+```bash
+coiled run \
+  --vm-type g6e.2xlarge --region us-east-1 --software aifs-docker \
+  --file main.py \
+  --env ARRAYLAKE_TOKEN=$(cat .arraylake_api_token) \
+  -- python main.py forecast 2026-07-07T12:00 2026-07-07T12:00
+```
+
+Or start a Jupyter session (see `run_notebook.sh`) and use the
+`run-aifs-earthmover.ipynb` notebook.
 
 ## Dashboard demo
 
@@ -50,3 +89,4 @@ Run it from GitHub directly:
 
 ```
 uvx marimo edit --sandbox https://github.com/earth-mover/aifs-demo/blob/main/dashboard.py
+```

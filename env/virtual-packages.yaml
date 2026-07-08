@@ -1,0 +1,11 @@
+# Virtual packages that conda-lock fabricates when solving for linux-64.
+# Coiled's remote builder fails to provide __cuda, so we solve locally with
+# conda-lock (which uses this spec) and give Coiled the resulting lockfile.
+subdirs:
+  linux-64:
+    packages:
+      __unix: "0"
+      __linux: "5.10"
+      __glibc: "2.17"
+      __archspec: "1"
+      __cuda: "12.6"
