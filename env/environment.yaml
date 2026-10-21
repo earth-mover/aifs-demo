@@ -19,7 +19,9 @@ dependencies:
  - torchgeo
  - flash-attn
  - earthkit-regrid
- - pip
+ - ca-certificates>=2026.10.19
+ - certifi>=2026.10.19
+ - pip>=26.2.2
  - pip:
    - anemoi-inference[huggingface]==0.4.9
    - anemoi-models==0.3.1
